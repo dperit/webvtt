@@ -21,17 +21,25 @@
 #endif
 
 struct webvtt_parser {
-  int state;
+  int parse_state;
+  int reached_buffer_end;
+  int invalid_buffer;
+  int has_BOM;
   char *buffer;
   long offset, length;
 };
+
+enum parse_states {
+BOM: 0,
+SIGNATURE: 1,  
+}
 
 webvtt_parser *
 webvtt_parse_new(void)
 {
   webvtt_parser *ctx = malloc(sizeof(*ctx));
   if (ctx) {
-    ctx->state = 0;
+    ctx->parse_state = 0;
     ctx->buffer = malloc(BUFFER_SIZE);
     if (ctx->buffer == NULL) {
       free(ctx);
@@ -47,7 +55,7 @@ void
 webvtt_parse_free(webvtt_parser *ctx)
 {
   if (ctx) {
-    ctx->state = 0;
+    ctx->parse_state = 0;
     if (ctx->buffer) {
       free(ctx->buffer);
       ctx->buffer = NULL;
@@ -105,6 +113,7 @@ webvtt_parse_cue(webvtt_parser *ctx)
 
   int smin,ssec,smsec;
   int emin,esec,emsec;
+  //TODO: implement timestamp parsing rules
   int items = sscanf(p, "%d:%d.%d --> %d:%d.%d",
                         &smin, &ssec, &smsec, &emin, &esec, &emsec);
   if (items < 6) {
@@ -155,52 +164,95 @@ webvtt_parse_cue(webvtt_parser *ctx)
   return cue;
 }
 
+//TODO: Document where this was found in the standard according to style found elsewhere, probably in the tests?
+//Returns 1 if the BOM is present, 0 if not. Also advances the ctx offset by 3 if the BOM is found
+int webvtt_parse_byte_order_mark(webvtt_parser *ctx){
+  if (ctx->length < 3){
+    ctx->reached_buffer_end = 1;
+  }else {
+    char *p = ctx->buffer;
+    //We'll be going ahead to the next stage if it has a BOM or not
+    ctx->parse_state++;
+    //Assuming that this set of hexcodes == U+FEFF BYTE ORDER MARK (BOM)
+    if (p[0] == (char)0xef && p[1] == (char)0xbb && p[2] == (char)0xbf){
+      ctx->offset += 3;
+      ctx->has_BOM = 1;
+      return 1;
+    }else {
+      ctx->has_BOM = 0;
+      return 0;
+    }
+  }
+}
+
+int webvtt_parse_signature(webvtt_parser *ctx){
+  // Check for signature
+  if (!ctx->has_BOM && ctx->length < 6) {
+    ctx->reached_buffer_end = 1;
+    fprintf(stderr, "Too short. Not capable of parsing signature yet\n");
+  }else if (ctx->has_BOM && ctx->length < 9) {
+    ctx->reached_buffer_end = 1;
+    fprintf(stderr, "Too short. Not capable of parsing signature yet\n");
+  }else {
+    if (memcmp(ctx->buffer[ctx->offset], "WEBVTT", 6)) {
+      ctx->offset += 6;
+      ctx->parse_state = 2;
+      return 1;
+    }else {
+      ctx->invalid_buffer = 1;
+      return 0;
+    }
+  }
+}
+
+int webvtt_skip_whitespace(webvtt_parser *ctx){
+  //TODO: Make sure that 
+  while (ctx->offset < ctx->length && isspace(ctx->buffer[ctx->offset]))
+    ctx->offset++;
+  
+}
+
 webvtt_cue *
 webvtt_parse(webvtt_parser *ctx)
 {
   webvtt_cue *cue = NULL;
-  char *p = ctx->buffer;
-
-  // Check for signature
-  if (ctx->length < 6) {
-    fprintf(stderr, "Too short. Not a webvtt file\n");
-    return NULL;
-  }
-  if (p[0] == (char)0xef && p[1] == (char)0xbb && p[2] == (char)0xbf) {
-    fprintf(stderr, "Byte order mark\n");
-    p += 3;
-    if (ctx->length < 9) {
-      fprintf(stderr, "Too short. Not a webvtt file\n");
-      return NULL;
+  
+  //TODO: Make an enum encoding parse_states
+  while(ctx->reached_buffer_end != 1 && ctx->invalid_buffer != 1){
+    
+    switch(ctx->parse_state){
+        //Each case should check for whatever it is going to check for and advance the parsers offset
+        //to after the thing it is checking for.
+        //If it hits end of buffer unexpectedly then you should reset ctx's offset to as it was at
+        //the beginning of the case and set the reached_buffer_end flag to 1. This allows the
+        //parser to be re-run once more file is available.
+        //If it finds something indicating that the provided file is not valid then it should set the
+        //invalid_buffer flag to 1.
+      case 0:
+          webvtt_parse_byte_order_mark(ctx);
+          break;
+        case 1:
+        webvtt_parse_signature(ctx);
+          break;
+    
+    webvtt_skip_whitespace(ctx);
+    
+    cue = webvtt_parse_cue(ctx);
+    if (cue) {
+      webvtt_cue *head = cue;
+      webvtt_cue *next;
+      do {
+        next = webvtt_parse_cue(ctx);
+        head->next = next;
+        head = next;
+      } while (next != NULL);
     }
-  }
-  if (memcmp(p, "WEBVTT", 6)) {
-    fprintf(stderr, "Bad magic. Not a webvtt file?\n");
-    return NULL;
-  }
-  p += 6;
-  fprintf(stderr, "Found signature\n");
-
-  // skip whitespace
-  while (p - ctx->buffer < ctx->length && isspace(*p))
-    p++;
-  ctx->offset = p - ctx->buffer;
-
-  cue = webvtt_parse_cue(ctx);
-  if (cue) {
+    
     webvtt_cue *head = cue;
-    webvtt_cue *next;
-    do {
-      next = webvtt_parse_cue(ctx);
-      head->next = next;
-      head = next;
-    } while (next != NULL);
-  }
-
-  webvtt_cue *head = cue;
-  while (head != NULL) {
-    webvtt_print_cue(stderr, head);
-    head = head->next;
+    while (head != NULL) {
+      webvtt_print_cue(stderr, head);
+      head = head->next;
+    }
   }
 
   return cue;
