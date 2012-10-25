@@ -22,6 +22,7 @@ extern "C" {
    we store these in a linked list */
 typedef struct webvtt_cue webvtt_cue;
 struct webvtt_cue {
+  char *identifier; /** text value of the cue identifier. Can be null **/
   char *text;       /** text value of the cue */
   long start, end;  /** timestamps in milliseconds */
   webvtt_cue *next; /** pointer to the next cue */

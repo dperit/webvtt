@@ -26,13 +26,15 @@ SIGNATURE = 1,
 FIND_CHARACTERS_BEFORE_CUES = 2,
 SKIP_CHARACTERS_BEFORE_CUES = 3,
 SKIP_LINE_TERMINATORS_BEFORE_CUE = 4,
-CUE = 5
+CUE_IDENTIFIER = 5,
+CUE_TIMINGS = 6,
+CUE = 7
 };
 
 struct webvtt_parser {
   int parse_state;
   int reached_buffer_end;
-  int invalid_buffer;
+  int invalid_webvtt;
   int has_BOM;
   char *buffer;
   long offset, length;
@@ -203,7 +205,7 @@ int webvtt_parse_signature(webvtt_parser *ctx){
       ctx->offset += 6;
       return 1;
     }else {
-      ctx->invalid_buffer = 1;
+      ctx->invalid_webvtt = 1;
       return 0;
     }
   }
@@ -236,7 +238,7 @@ void webvtt_skip_characters_before_cues(webvtt_parser *ctx){
     //just indicate we've reached the end. That way when we run through again with more buffer
     //we'll just run through this method again until the whitespace ends
     ctx->reached_buffer_end = 1;
-  }  
+  }
 }
 
 //A WebVTT line terminator consists of one of the following:
@@ -253,6 +255,176 @@ void webvtt_skip_line_terminators_before_cue(webvtt_parser *ctx){
 
 }
 
+/*A WebVTT cue identifier is any sequence of one or more characters not containing the 
+ substring "-->" (U+002D HYPHEN-MINUS, U+002D HYPHEN-MINUS, U+003E GREATER-THAN SIGN), 
+ nor containing any U+000A LINE FEED (LF) characters or U+000D CARRIAGE RETURN (CR) characters.*/
+void webvtt_parse_cue_identifier(webvtt_parser *ctx, webvtt_cue *cue){
+  int startingOffset = ctx->offset;
+  while (ctx->offset < ctx->length && (ctx->buffer[ctx->offset] != (char)0xA
+                                       &&  ctx->buffer[ctx->offset] != (char)0xD)){
+    //If the offset is at least 3 characters away from the length then test for the substring "-->"
+    if ((ctx->length - ctx->offset) >= 3){
+      if (ctx->buffer[ctx->offset] == (char)0x2D){
+        if (ctx->buffer[ctx->offset+1] == (char)0x2D){
+          if (ctx->buffer[ctx->offset+2] == (char)0x3E){
+            //If we find it then that means they don't have an identifier- reset offset to the starting
+            //position, set identifier string in the cue to NULL, and return
+            ctx->offset = startingOffset;
+            cue->identifier = NULL;
+            return;
+          }
+        }
+      }
+    }
+    ctx->offset++;
+  }
+  if (ctx->offset == ctx->length){
+    ctx->reached_buffer_end = 1;
+    //Unfortunately we have to set the offset back to the start in this case, as otherwise we'd lose
+    //the position where the identifier starts
+    ctx->offset = startingOffset;
+  }else {
+    //if we reach here then we found the identifier!
+    //Allocate memory, copy the text into it, assign the identifier in the cue to it
+    //TODO: The above when I am less tired
+  }
+  
+}
+
+//I am a helper function to webvtt_parse_cue_timings
+int webvtt_advance_through_numbers(webvtt_parser *ctx){
+  while (ctx->offset < ctx->length && (ctx->buffer[ctx->offset] >= (char)0x30
+                                       &&  ctx->buffer[ctx->offset] <= (char)0x39)){
+    ctx->offset++;
+  }
+  if (ctx->offset == ctx->length){
+    ctx->reached_buffer_end = 1;
+    return 0;
+  }else {
+    return 1;
+  }
+
+}
+
+void webvtt_parse_cue_timings(webvtt_parser *ctx, webvtt_cue *cue, webvtt_cue *previous_cue){
+  
+  //NEXTSTEP: offload much of the functionality here into another method so it can be re-used for part
+  //2 of the timestamp.
+  //TODO: implement a check to make sure that this cue timing has a start time greater than or equal to
+  // the previous cue
+  int startingOffset = ctx->offset;
+  
+  int hours = 0;
+  int minutes = 0;
+  int seconds = 0;
+  int seconds_fraction = 0;
+  
+  int has_hours;
+  
+  int first_part_start_point = ctx->offset;
+  
+  //Advance through the numbers, get out and reset to start point if we hit the end of the buffer
+  //in the process
+  if (!advance_through_numbers(ctx)){
+    ctx->offset = startingOffset;
+    return;
+  }
+  
+  if (!(ctx->offset - first_part_start_point) >= 2){
+    ctx->invalid_webvtt = 1;
+    return;
+  }
+  
+  //Make sure next char is a colon
+  //TODO: Make sure that we test to make sure we aren't putting the offset past the end of the buffer during these
+  if (ctx->buffer[ctx->offset] == (char)0x3A){
+    ctx->offset++;
+  }
+  
+  int second_part_start_point = ctx->offset;
+  
+  if (!advance_through_numbers(ctx)){
+    ctx->offset = startingOffset;
+    return;
+  }
+  
+  if ((ctx->offset - second_part_start_point) != 2){
+    ctx->invalid_webvtt = 1;
+    return;
+  }
+  
+  if (ctx->buffer[ctx->offset] == (char)0x3A){
+    ctx->offset++;
+    //We've got hours, minutes, seconds, second fractions
+    has_hours = 1;
+  }else if (ctx->buffer[ctx->offset] == (char)0x2E) {
+    ctx->offset++;
+    //We've got minutes, seconds, second fractions
+    has_hours = 0;
+  }else {
+    ctx->invalid_webvtt = 1;
+    return;
+  }
+  
+  int third_part_start_point = ctx->offset;
+  
+  if (!advance_through_numbers(ctx)){
+    ctx->offset = startingOffset;
+    return;
+  }
+  
+  if (has_hours){
+    if ((ctx->offset - third_part_start_point) != 2){
+      ctx->invalid_webvtt = 1;
+      return;
+    }
+    int fourth_part_start_point = ctx->offset;
+    if (!advance_through_numbers(ctx)){
+      ctx->offset = startingOffset;
+      return;
+    }
+    if (ctx->offset - fourth_part_start_point != 3){
+      ctx->invalid_webvtt = 1;
+      return;
+    }
+    //Make sure the nobody sticks something clever after the seconds that causes sscanf to blow up
+    if (ctx->buffer[ctx->offset + 1] != (char)0x20 && 
+        ctx->buffer[ctx->offset + 1] != (char)0x9  &&
+        ctx->buffer[ctx->offset + 1] != (char)0xA  &&
+        ctx->buffer[ctx->offset + 1] != (char)0xD){
+      ctx->invalid_webvtt = 1;
+      return;
+    }
+    sscanf(ctx->buffer + first_part_start_point, "%d:%d:%d.%d", &hours, &minutes, &seconds, &seconds_fraction);
+  }else {
+    if ((ctx->offset - third_part_start_point) < 2){
+      ctx->invalid_webvtt = 1;
+      return;
+    }
+    //Make sure the nobody sticks something clever after the seconds that causes sscanf to blow up
+    if (ctx->buffer[ctx->offset + 1] != (char)0x20 && 
+        ctx->buffer[ctx->offset + 1] != (char)0x9  &&
+        ctx->buffer[ctx->offset + 1] != (char)0xA  &&
+        ctx->buffer[ctx->offset + 1] != (char)0xD){
+      ctx->invalid_webvtt = 1;
+      return;
+    }
+    
+    hours = 0;
+    sscanf(ctx->buffer + first_part_start_point, "%d:%d.%d", &minutes, &seconds, &seconds_fraction);
+  }
+
+
+
+
+  
+//  
+//  if (items < 6) {
+//    fprintf(stderr, "Couldn't parse cue timestamps\n");
+//    return NULL;
+//  }
+}
+
 webvtt_cue * webvtt_cue_link(webvtt_cue *to_link, webvtt_cue *to_link_from){
   if (to_link && to_link_from) {
     to_link_from->next = to_link;
@@ -266,16 +438,25 @@ webvtt_cue *
 webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue, webvtt_cue* last_cue)
 {
   
+  //TODO: Get the timings of the previous cue to the one that we are currently working,
+  //and then write the code that keeps it updated
   if (last_cue == NULL && first_cue != NULL){
     last_cue = first_cue;
     while (last_cue->next != NULL){
       last_cue = last_cue->next;
     }
   }
+  
+  //This is the cue that has the previous timings! We'll keep it updated to point to the correct cue
+  webvtt_cue *has_previous_timing = last_cue;
   webvtt_cue *cue = NULL;
   
+  if (ctx->parse_state >= CUE_IDENTIFIER){
+    cue = last_cue;
+  }
+  
   //TODO: Make an enum encoding parse_states
-  while(ctx->reached_buffer_end != 1 && ctx->invalid_buffer != 1){
+  while(ctx->reached_buffer_end != 1 && ctx->invalid_webvtt != 1){
     
     switch(ctx->parse_state){
         //Each case should check for whatever it is going to check for and advance the parsers offset
@@ -284,7 +465,7 @@ webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue, webvtt_cue* last_cue)
         //the beginning of the case and set the reached_buffer_end flag to 1. This allows the
         //parser to be re-run once more file is available.
         //If it finds something indicating that the provided file is not valid then it should set the
-        //invalid_buffer flag to 1.
+        //invalid_webvtt flag to 1.
       case BOM:
         webvtt_parse_byte_order_mark(ctx);
         if (!ctx->reached_buffer_end){
@@ -293,7 +474,7 @@ webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue, webvtt_cue* last_cue)
         break;
       case SIGNATURE:
         webvtt_parse_signature(ctx);
-        if (!ctx->reached_buffer_end && !ctx->invalid_buffer){
+        if (!ctx->reached_buffer_end && !ctx->invalid_webvtt){
           ctx->parse_state = FIND_CHARACTERS_BEFORE_CUES;
         }
         break;
@@ -318,18 +499,35 @@ webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue, webvtt_cue* last_cue)
         break;
       case SKIP_LINE_TERMINATORS_BEFORE_CUE:
         webvtt_skip_line_terminators_before_cue(ctx);
-        if (!ctx->reached_buffer_end && !ctx->invalid_buffer){
-          ctx->parse_state = CUE;
+        if (!ctx->reached_buffer_end && !ctx->invalid_webvtt){
+          ctx->parse_state = CUE_IDENTIFIER;
         }
         break;
-      case CUE:
-        cue = webvtt_parse_cue(ctx);
-        if (!ctx->reached_buffer_end && !ctx->invalid_buffer){
+      case CUE_IDENTIFIER:
+        //This is where we always make the cue, even if no cue identifier exists
+        //We won't allocate anything if a cue already exists, which will happen if the buffer terminated
+        //partway through the cue identifier and we're continuing from where we stopped
+        if (cue == NULL){
+          cue = malloc(sizeof(*cue));
           if (first_cue == NULL){
             first_cue = cue;
             last_cue = cue;
+          }else {
+            last_cue = webvtt_cue_link(cue, last_cue);
           }
-          last_cue = webvtt_cue_link(cue, last_cue);
+        }
+        webvtt_parse_cue_identifier(ctx, cue);
+        if (!ctx->reached_buffer_end){
+          ctx->parse_state = CUE_TIMINGS;
+        }
+      case CUE_TIMINGS:
+        webvtt_parse_timestamps(ctx, cue);
+        if (!ctx->reached_buffer_end && !ctx->invalid_webvtt){
+          
+        }
+      case CUE:
+        cue = webvtt_parse_cue(ctx);
+        if (!ctx->reached_buffer_end && !ctx->invalid_webvtt){
         }
         break;
     }
