@@ -265,6 +265,13 @@ webvtt_cue * webvtt_cue_link(webvtt_cue *to_link, webvtt_cue *to_link_from){
 webvtt_cue *
 webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue, webvtt_cue* last_cue)
 {
+  
+  if (last_cue == NULL && first_cue != NULL){
+    last_cue = first_cue;
+    while (last_cue->next != NULL){
+      last_cue = last_cue->next;
+    }
+  }
   webvtt_cue *cue = NULL;
   
   //TODO: Make an enum encoding parse_states
@@ -335,22 +342,6 @@ webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue, webvtt_cue* last_cue)
   return cue;
 }
 
-webvtt_cue * webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue){
-  webvtt_cue *last_cue = first_cue;
-  //Find out what the last cue is so we can send it into the parser
-  if (first_cue != NULL){
-    while (last_cue->next != NULL){
-      last_cue = last_cue->next;
-    }
-  }
-  return webvtt_parse(ctx, first_cue, last_cue);
-}
-
-webvtt_cue * webvtt_parse(webvtt_parser *ctx){
-  webvtt_cue *first_cue = NULL;
-  return webvtt_parse(ctx, first_cue);
-}
-
 webvtt_cue *
 webvtt_parse_buffer(webvtt_parser *ctx, char *buffer, long length)
 {
@@ -359,7 +350,7 @@ webvtt_parse_buffer(webvtt_parser *ctx, char *buffer, long length)
   memcpy(ctx->buffer, buffer, bytes);
   ctx->length += bytes;
 
-  return webvtt_parse(ctx);
+  return webvtt_parse(ctx, NULL, NULL);
 }
 
 webvtt_cue *
@@ -372,7 +363,7 @@ webvtt_parse_file(webvtt_parser *ctx, FILE *in)
     fprintf(stderr, "WARNING: truncating input at %d bytes."
                     " This is a bug,\n", BUFFER_SIZE);
 
-  return webvtt_parse(ctx);
+  return webvtt_parse(ctx, NULL, NULL);
 }
 
 webvtt_cue *
