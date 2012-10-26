@@ -233,33 +233,51 @@ void webvtt_skip_characters_before_cues(webvtt_parser *ctx){
                                        && ctx->buffer[ctx->offset] != (char)0xD)){
     ctx->offset++;
   }
-  if (ctx->offset == ctx->length){
+  if (ctx->offset >= ctx->length){
     //Don't retreat the offset or change the parse state if we hit the end during whitespace 
     //just indicate we've reached the end. That way when we run through again with more buffer
     //we'll just run through this method again until the whitespace ends
+    ctx->offset = ctx->length;
     ctx->reached_buffer_end = 1;
   }
 }
 
 //A WebVTT line terminator consists of one of the following:
-
 //A U+000D CARRIAGE RETURN U+000A LINE FEED (CRLF) character pair.
 //A single U+000A LINE FEED (LF) character.
 //A single U+000D CARRIAGE RETURN (CR) character.
 void webvtt_skip_line_terminators_before_cue(webvtt_parser *ctx){
+  int starting_offset = ctx->offset;
   //TODO: Implement this!
-  //if (ctx->offset < ctx->length){
-//  }else {
-//    ctx->reached_buffer_end = 1;
-//  }
-
+  int number_of_terminators = 0;
+  while(ctx->offset < ctx->length && (ctx->buffer[ctx->offset] == (char)0xD
+                                  ||  ctx->buffer[ctx->offset] == (char)0xA)){
+    if (ctx->buffer[ctx->offset] == (char)0xD 
+        && (ctx->offset + 1) < ctx->length 
+        && (ctx->buffer[ctx->offset + 1] == (char)0xA)){
+      ctx->offset+=2;
+    }else {
+      ctx->offset++;
+    }
+    number_of_terminators++;
+  }
+  if (ctx->offset >= ctx->length){
+    ctx->reached_buffer_end = 1;
+    //return to start of the terminator set as we'll need to count them again if we run out of buffer
+    ctx->offset = starting_offset;
+    return;
+    //Make sure there are at least 2 terminators before the cue
+  }else if (number_of_terminators < 2){
+    ctx->invalid_webvtt = 1;
+    return;
+  }
 }
 
 /*A WebVTT cue identifier is any sequence of one or more characters not containing the 
  substring "-->" (U+002D HYPHEN-MINUS, U+002D HYPHEN-MINUS, U+003E GREATER-THAN SIGN), 
  nor containing any U+000A LINE FEED (LF) characters or U+000D CARRIAGE RETURN (CR) characters.*/
 void webvtt_parse_cue_identifier(webvtt_parser *ctx, webvtt_cue *cue){
-  int startingOffset = ctx->offset;
+  int starting_offset = ctx->offset;
   while (ctx->offset < ctx->length && (ctx->buffer[ctx->offset] != (char)0xA
                                        &&  ctx->buffer[ctx->offset] != (char)0xD)){
     //If the offset is at least 3 characters away from the length then test for the substring "-->"
@@ -269,7 +287,7 @@ void webvtt_parse_cue_identifier(webvtt_parser *ctx, webvtt_cue *cue){
           if (ctx->buffer[ctx->offset+2] == (char)0x3E){
             //If we find it then that means they don't have an identifier- reset offset to the starting
             //position, set identifier string in the cue to NULL, and return
-            ctx->offset = startingOffset;
+            ctx->offset = starting_offset;
             cue->identifier = NULL;
             return;
           }
@@ -278,11 +296,11 @@ void webvtt_parse_cue_identifier(webvtt_parser *ctx, webvtt_cue *cue){
     }
     ctx->offset++;
   }
-  if (ctx->offset == ctx->length){
+  if (ctx->offset >= ctx->length){
     ctx->reached_buffer_end = 1;
     //Unfortunately we have to set the offset back to the start in this case, as otherwise we'd lose
     //the position where the identifier starts
-    ctx->offset = startingOffset;
+    ctx->offset = starting_offset;
   }else {
     //if we reach here then we found the identifier!
     //Allocate memory, copy the text into it, assign the identifier in the cue to it
@@ -297,7 +315,7 @@ int webvtt_advance_through_numbers(webvtt_parser *ctx){
                                        &&  ctx->buffer[ctx->offset] <= (char)0x39)){
     ctx->offset++;
   }
-  if (ctx->offset == ctx->length){
+  if (ctx->offset >= ctx->length){
     ctx->reached_buffer_end = 1;
     return 0;
   }else {
@@ -306,14 +324,7 @@ int webvtt_advance_through_numbers(webvtt_parser *ctx){
 
 }
 
-void webvtt_parse_cue_timings(webvtt_parser *ctx, webvtt_cue *cue, webvtt_cue *previous_cue){
-  
-  //NEXTSTEP: offload much of the functionality here into another method so it can be re-used for part
-  //2 of the timestamp.
-  //TODO: implement a check to make sure that this cue timing has a start time greater than or equal to
-  // the previous cue
-  int startingOffset = ctx->offset;
-  
+long webvtt_parse_timestamp(webvtt_parser *ctx){
   int hours = 0;
   int minutes = 0;
   int seconds = 0;
@@ -325,32 +336,38 @@ void webvtt_parse_cue_timings(webvtt_parser *ctx, webvtt_cue *cue, webvtt_cue *p
   
   //Advance through the numbers, get out and reset to start point if we hit the end of the buffer
   //in the process
-  if (!advance_through_numbers(ctx)){
-    ctx->offset = startingOffset;
-    return;
+  if (!webvtt_advance_through_numbers(ctx)){
+    ctx->offset = first_part_start_point;
+    return -1;
   }
   
+  //If there aren't at least two numbers between the start point and the first c
   if (!(ctx->offset - first_part_start_point) >= 2){
     ctx->invalid_webvtt = 1;
-    return;
+    return -1;
   }
   
   //Make sure next char is a colon
-  //TODO: Make sure that we test to make sure we aren't putting the offset past the end of the buffer during these
   if (ctx->buffer[ctx->offset] == (char)0x3A){
+    //We don't have to test that this offset increase will keep the offset within bounds because
+    //advance through numbers will catch it and reset it if that is the case
     ctx->offset++;
+  }else {
+    ctx->invalid_webvtt = 1;
+    return -1;
   }
+
   
   int second_part_start_point = ctx->offset;
   
-  if (!advance_through_numbers(ctx)){
-    ctx->offset = startingOffset;
-    return;
+  if (!webvtt_advance_through_numbers(ctx)){
+    ctx->offset = first_part_start_point;
+    return -1;
   }
   
   if ((ctx->offset - second_part_start_point) != 2){
     ctx->invalid_webvtt = 1;
-    return;
+    return -1;
   }
   
   if (ctx->buffer[ctx->offset] == (char)0x3A){
@@ -363,29 +380,29 @@ void webvtt_parse_cue_timings(webvtt_parser *ctx, webvtt_cue *cue, webvtt_cue *p
     has_hours = 0;
   }else {
     ctx->invalid_webvtt = 1;
-    return;
+    return -1;
   }
   
   int third_part_start_point = ctx->offset;
   
-  if (!advance_through_numbers(ctx)){
-    ctx->offset = startingOffset;
-    return;
+  if (!webvtt_advance_through_numbers(ctx)){
+    ctx->offset = first_part_start_point;
+    return -1;
   }
   
   if (has_hours){
     if ((ctx->offset - third_part_start_point) != 2){
       ctx->invalid_webvtt = 1;
-      return;
+      return -1;
     }
     int fourth_part_start_point = ctx->offset;
-    if (!advance_through_numbers(ctx)){
-      ctx->offset = startingOffset;
-      return;
+    if (!webvtt_advance_through_numbers(ctx)){
+      ctx->offset = first_part_start_point;
+      return -1;
     }
     if (ctx->offset - fourth_part_start_point != 3){
       ctx->invalid_webvtt = 1;
-      return;
+      return -1;
     }
     //Make sure the nobody sticks something clever after the seconds that causes sscanf to blow up
     if (ctx->buffer[ctx->offset + 1] != (char)0x20 && 
@@ -393,13 +410,13 @@ void webvtt_parse_cue_timings(webvtt_parser *ctx, webvtt_cue *cue, webvtt_cue *p
         ctx->buffer[ctx->offset + 1] != (char)0xA  &&
         ctx->buffer[ctx->offset + 1] != (char)0xD){
       ctx->invalid_webvtt = 1;
-      return;
+      return -1;
     }
     sscanf(ctx->buffer + first_part_start_point, "%d:%d:%d.%d", &hours, &minutes, &seconds, &seconds_fraction);
   }else {
     if ((ctx->offset - third_part_start_point) < 2){
       ctx->invalid_webvtt = 1;
-      return;
+      return -1;
     }
     //Make sure the nobody sticks something clever after the seconds that causes sscanf to blow up
     if (ctx->buffer[ctx->offset + 1] != (char)0x20 && 
@@ -407,22 +424,75 @@ void webvtt_parse_cue_timings(webvtt_parser *ctx, webvtt_cue *cue, webvtt_cue *p
         ctx->buffer[ctx->offset + 1] != (char)0xA  &&
         ctx->buffer[ctx->offset + 1] != (char)0xD){
       ctx->invalid_webvtt = 1;
-      return;
+      return -1;
     }
     
     hours = 0;
     sscanf(ctx->buffer + first_part_start_point, "%d:%d.%d", &minutes, &seconds, &seconds_fraction);
   }
-
-
-
-
   
-//  
-//  if (items < 6) {
-//    fprintf(stderr, "Couldn't parse cue timestamps\n");
-//    return NULL;
-//  }
+  long time = hours*(1000*60*60) + minutes*(1000*60) + seconds * 1000 + seconds_fraction * 1e-3;
+  
+  return time;
+}
+
+void webvtt_advance_through_spaces_and_tabs(webvtt_parser *ctx){
+  while (ctx->offset < ctx->length && (ctx->buffer[ctx->offset] == (char)0x20
+                                   || ctx->buffer[ctx->offset] == (char)0x9)){
+    ctx->offset++;
+  }
+  if (ctx->offset >= ctx->length){
+    ctx->offset = ctx->length;
+    ctx->reached_buffer_end = 1;
+  }
+}
+
+void webvtt_parse_cue_timings(webvtt_parser *ctx, webvtt_cue *cue, webvtt_cue *previous_cue){
+  
+  //NEXTSTEP: offload much of the functionality here into another method so it can be re-used for part
+  //2 of the timestamp.
+  //TODO: implement a check to make sure that this cue timing has a start time greater than or equal to
+  // the previous cue
+  int startingOffset = ctx->offset;
+  
+  long startTime = webvtt_parse_timestamp(ctx);
+  //TODO: Check start time against previous start time, make sure it's greater than
+  if (ctx->invalid_webvtt){
+    return;
+  }else if (ctx->reached_buffer_end){
+    ctx->offset = startingOffset;
+    return;
+  }
+  
+  webvtt_advance_through_spaces_and_tabs(ctx);
+  
+  if (ctx->length - ctx->offset > 3){
+    if (ctx->buffer[ctx->offset] == (char)0x2D &&
+        ctx->buffer[ctx->offset + 1] == ( char)0x2D &&
+        ctx->buffer[ctx->offset + 2] == ( char)0x3E){
+      ctx->offset += 3;
+    }else {
+      ctx->invalid_webvtt = 1;
+      return;
+    }
+  }else {
+    ctx->offset = startingOffset;
+    ctx->reached_buffer_end = 1;
+    return;
+  }
+  
+  webvtt_advance_through_spaces_and_tabs(ctx);
+  
+  long endTime = webvtt_parse_timestamp(ctx);
+  //TODO: Check end time against start time, make sure it's greater than
+  if (ctx->invalid_webvtt){
+    return;
+  }else if (ctx->reached_buffer_end){
+    ctx->offset = startingOffset;
+    return;
+  }
+  cue->start = startTime;
+  cue->end = endTime;
 }
 
 webvtt_cue * webvtt_cue_link(webvtt_cue *to_link, webvtt_cue *to_link_from){
@@ -521,7 +591,7 @@ webvtt_parse(webvtt_parser *ctx, webvtt_cue *first_cue, webvtt_cue* last_cue)
           ctx->parse_state = CUE_TIMINGS;
         }
       case CUE_TIMINGS:
-        webvtt_parse_timestamps(ctx, cue);
+        webvtt_parse_cue_timings(ctx, cue, has_previous_timing);
         if (!ctx->reached_buffer_end && !ctx->invalid_webvtt){
           
         }
